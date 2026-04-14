@@ -28,7 +28,7 @@ import urllib.parse
 from pathlib import Path
 from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 
 GHE_TOKEN = os.environ["GHE_TOKEN"]
