@@ -1,0 +1,28 @@
+flowchart TB
+    subgraph WF["Wells Fargo side (on-prem)"]
+        MYTHOS["Mythos tranche arrives<br/>(thousands of AVIDs, many repos)"]
+        CONTROLLER["Raven controller (deterministic)<br/>filter open AVIDs - map AVID to repo<br/>exact dedupe - preserve source IDs"]
+        EXPORT["Export snapshot of tranche<br/>to a place Devin can reach<br/>(e.g. one commit into a tranche repo in SCM)"]
+        VALIDATE["Controller validates grouping output<br/>every AVID accounted for - size cap<br/>no cross-repo groups<br/>overlapping change sets -> serialize"]
+        NOTE["Path B (hands-off, later):<br/>Finding Automation auto-remediates<br/>on scan completion (severity/repo filters,<br/>cap 50 findings/scan) - controller<br/>only reconciles PR URLs"]
+        RECONCILE["Reconcile back into Raven<br/>AVID -> group -> finding -> session -> PR"]
+    end
+
+    subgraph DEVIN["Devin side"]
+        SCAN["Security Swarm ingestion scan<br/>(one per affected repo, via API)<br/>1. SQL import of that repo's AVIDs<br/>2. verify against real code<br/>3. code-aware grouping:<br/>shared root cause, coherent fix,<br/>predicted files to change"]
+        FINDINGS["Consolidated findings<br/>one finding = one group<br/>(carries its AVIDs + rationale)"]
+        REMEDIATE["Remediation sessions<br/>one per approved finding<br/>each sees ONLY its own group"]
+        PRS["One PR per group<br/>tests + quality checks"]
+    end
+
+    MYTHOS --> CONTROLLER
+    CONTROLLER --> EXPORT
+    CONTROLLER -- "POST /v3/.../code-scans<br/>{repo_name, profile_id} per repo" --> SCAN
+    EXPORT -. "scan queries the snapshot" .-> SCAN
+    SCAN --> FINDINGS
+    FINDINGS -- "Path A (controller-in-loop):<br/>poll GET .../findings" --> VALIDATE
+    VALIDATE -- "POST .../findings/{id}/remediate" --> REMEDIATE
+    FINDINGS -. "Path B: Finding Automation<br/>(code_scan:finding -> remediate_finding)" .-> REMEDIATE
+    REMEDIATE --> PRS
+    PRS --> RECONCILE
+    NOTE ~~~ RECONCILE

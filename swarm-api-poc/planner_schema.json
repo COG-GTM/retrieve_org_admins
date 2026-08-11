@@ -1,0 +1,99 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Raven grouping planner output",
+  "description": "Strict structured output contract for the code-aware grouping step (Swarm triage or an external categorization session). The deterministic controller must validate this before any remediation is launched (see validate_groups.py).",
+  "type": "object",
+  "required": ["repository", "groups", "ungrouped_avids", "duplicates"],
+  "additionalProperties": false,
+  "properties": {
+    "repository": {
+      "type": "string",
+      "description": "owner/repo this plan applies to. Groups must never cross repositories.",
+      "pattern": "^[^/]+/[^/]+$"
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "group_id",
+          "avids",
+          "shared_root_cause",
+          "reported_locations",
+          "expected_files_to_change",
+          "grouping_rationale",
+          "confidence",
+          "recommended_tests"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "pattern": "^RG-[0-9]{3,}$"
+          },
+          "avids": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" },
+            "description": "Every constituent AVID. Each input AVID must appear in exactly one group, or in ungrouped_avids, or in duplicates."
+          },
+          "shared_root_cause": {
+            "type": "string",
+            "minLength": 10,
+            "description": "The underlying defect that makes these AVIDs one coherent fix."
+          },
+          "reported_locations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["file", "line"],
+              "additionalProperties": false,
+              "properties": {
+                "file": { "type": "string" },
+                "line": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "description": "Scanner-reported locations (raw facts, preserved separately from predictions)."
+          },
+          "expected_files_to_change": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" },
+            "description": "Prediction of the actual change set. Used by the controller for conflict detection and serialization; scored against the real PR diff in the pilot."
+          },
+          "grouping_rationale": {
+            "type": "string",
+            "minLength": 10
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "recommended_tests": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "ungrouped_avids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "AVIDs deliberately left as their own single-AVID remediation units, or deferred (e.g. found already mitigated/unreachable — in that case they should carry a disposition upstream, not silently vanish)."
+    },
+    "duplicates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["avid", "duplicate_of"],
+        "additionalProperties": false,
+        "properties": {
+          "avid": { "type": "string" },
+          "duplicate_of": { "type": "string", "description": "The AVID (member of a group or ungrouped) this record duplicates." }
+        }
+      },
+      "description": "Explicit duplicate relationships. The only sanctioned way for one AVID to map to another's remediation."
+    }
+  }
+}
