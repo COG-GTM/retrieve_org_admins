@@ -27,7 +27,7 @@ working material, not part of the host repo's tooling.
 | `validate_groups.py` | deterministic group validator (completeness, size cap, file-overlap conflicts) |
 | `planner_schema.json` | strict schema for structured grouping output |
 | `group_findings.py` | baseline candidate partitioner — a scoring baseline, not the grouping policy |
-| `raven_tranche_poc.sqlite` | 30 open AVITs: nodejs-goof (16) + meridian-insurance-crm (14) |
+| `mythos_tranche_poc.xlsx` | Mythos AVIT workbook: nodejs-goof (16) + meridian-insurance-crm (14) open AVITs |
 
 Synthetic data: AVIT ids, app ids, and business units are fabricated; the
 vulnerabilities, files, and line numbers are real (from Devin scans of COG-GTM repos).

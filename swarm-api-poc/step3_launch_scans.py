@@ -43,13 +43,14 @@ def create():
 
 
 def watch():
+    # There is no GET for a single scan; the list endpoint is the only status
+    # source, so poll it once per tick and index by scan_id.
     scans = state.get("scans", {})
     while True:
-        statuses = {}
-        for repo, scan_id in scans.items():
-            resp = S.get(url(f"code-scans/{scan_id}"))
-            body = resp.json() if resp.ok else {}
-            statuses[repo] = body.get("status", f"HTTP {resp.status_code}")
+        resp = S.get(url("code-scans/scans"), params={"limit": 50})
+        by_id = {i["scan_id"]: i.get("status") for i in resp.json().get("items", [])}
+        statuses = {repo: by_id.get(scan_id, "not-listed")
+                    for repo, scan_id in scans.items()}
         line = " | ".join(f"{r.split('/')[-1]}: {s}" for r, s in statuses.items())
         print(time.strftime("%H:%M:%S"), line)
         if all(s in ("completed", "failed", "cancelled") for s in statuses.values()):
