@@ -1,6 +1,6 @@
-# Raven Mythos Ingest v7 — consolidate-to-survivor: one open finding per remediation group
+# Raven Mythos Ingest v8 — strict-format consolidate-to-survivor, category at ingest
 
-> Imports the open Mythos AVIT records for the scanned repository from an attached Excel workbook, verifies each against the source code (dismissing false positives and duplicates with evidence), assigns each confirmed finding a GROUP-KEY per the customer's review policy (CWE family + primary fix file), then CONSOLIDATES each group to a single surviving open finding that carries every member AVIT. Final state: one open finding per remediation group (~5-7 per ~15 AVITs), ready for one remediation session / one PR each. AVIT identifiers preserved for reconciliation.
+> Imports the open Mythos AVIT records for the scanned repository from an attached Excel workbook, stamps each imported finding with a coarse remediation-family category at ingest time, verifies each against the source code (dismissing false positives with evidence), then consolidates each remediation group to a single surviving open finding whose note starts with strict machine-readable header lines (GROUP-KEY, MEMBER-AVITS, EXPECTED-FILES). Final state: one open finding per remediation group (hard target 5-7 groups per ~15 AVITs), each a self-contained one-session/one-PR work order. AVIT identifiers preserved for reconciliation.
 
 ## Ingestion Source Guidance
 
@@ -26,34 +26,28 @@ Carry onto each imported finding so it stays traceable back to Mythos and to RAV
 - Severity mapped straight through: Critical -> critical, High -> high, Medium -> medium, Low/Informational/Info -> low. Preserve the original Mythos severity string alongside the mapped value so any reprioritization is auditable.
 - Location as repo-relative file_path plus start_line-end_line. If the line numbers no longer match the current code (the export may predate recent commits), re-anchor using code_snippet and note that the line was adjusted. Never drop a finding solely because its line number is stale.
 
+CATEGORY STAMPING (mandatory): when importing each finding, set its category/vuln_slug to the remediation-family slug it belongs to, judged from the AVIT's CWE ID and description. Allowed family slugs (use ONLY these; when in doubt pick the closest — prefer merging over precision): injection (SQL/NoSQL/command/template/prototype-pollution — anything where untrusted input reaches an interpreter or object graph), xss-encoding (ALL output-encoding issues: reflected XSS, stored XSS, open redirect via unvalidated destination), hardcoded-secrets (ALL hardcoded credentials, secrets, tokens, default/seeded accounts), missing-authz (ALL missing/broken authentication or authorization: unauthenticated routes, missing role checks, mass assignment of privilege, trusting client-supplied identity/claims), session-config (session/cookie/JWT storage and configuration weaknesses), path-traversal (file path/zip handling), dos (ReDoS, resource exhaustion), config-hardening (framework/server misconfiguration not covered above). The customer performs a deterministic GROUP BY on this field, so every imported finding MUST have exactly one of these slugs.
+
 ## Triage Guidance
 
 Triage runs in two passes using per-finding dispositions only (never create new findings).
 
-PASS 1 — verify and key. Verify each imported finding against the actual code. Dismiss false positives (with file:line evidence and a named reason) and exact duplicates (keep the most complete as survivor). Never dismiss solely because confidence is low. For every finding that remains, choose a GROUP-KEY = <family>|<primary-fix-file>: <family> is a stable remediation-family slug (e.g. injection, xss, hardcoded-credentials, authz, session-config, dependency-upgrade, config-hardening) shared by findings whose fixes follow the same pattern; <primary-fix-file> is the repo-relative file the FIX will primarily change (from your verification, not the scanner-cited location). Customer policy: findings sharing a family SHOULD share a key; findings whose fixes change the same file MUST share a key. Target roughly 5-7 distinct keys per ~15-20 confirmed findings — prefer reusing an existing key over inventing a new one; a single-member key needs explicit justification.
+PASS 1 — verify. Verify each imported finding against the actual code. Dismiss false positives (with file:line evidence and a named reason). Never dismiss solely because confidence is low.
 
-PASS 2 — consolidate to one survivor per key. For each GROUP-KEY, elect exactly ONE survivor: the member with the highest severity (ties: the most complete/central finding). Update the survivor's note to be the group record, containing:
-GROUP-KEY: <key>
-MEMBER-AVITS: <comma-separated list of ALL member AVIDs, including the survivor's>
-then, for each member, a short block: its AVID, title, verified evidence (file:line), and expected fix change. End with EXPECTED-FILES: <all files the group's one PR will change> and GROUP-RATIONALE: <one sentence>.
-Dismiss every non-survivor member with reason 'CONSOLIDATED into <survivor finding id> (group <key>)' — this is a grouping disposition, not a judgment that the issue is invalid; say so in the note. Adjust the survivor's severity to the group's highest.
+PASS 2 — consolidate to one survivor per group. Group = the finding's family category (stamped at ingest), refined by one hard rule: findings whose fixes change the same file MUST be in the same group even across families. Allowed family slugs (use ONLY these; when in doubt pick the closest — prefer merging over precision): injection (SQL/NoSQL/command/template/prototype-pollution — anything where untrusted input reaches an interpreter or object graph), xss-encoding (ALL output-encoding issues: reflected XSS, stored XSS, open redirect via unvalidated destination), hardcoded-secrets (ALL hardcoded credentials, secrets, tokens, default/seeded accounts), missing-authz (ALL missing/broken authentication or authorization: unauthenticated routes, missing role checks, mass assignment of privilege, trusting client-supplied identity/claims), session-config (session/cookie/JWT storage and configuration weaknesses), path-traversal (file path/zip handling), dos (ReDoS, resource exhaustion), config-hardening (framework/server misconfiguration not covered above). HARD TARGET: 5-7 groups total for the repository (fewer is fine; more than 7 requires explicit justification per extra group — prefer merging over precision). For each group elect exactly ONE survivor (highest severity; ties: most complete). Dismiss every non-survivor with reason 'CONSOLIDATED into <survivor finding id> (group <key>) — true positive, tracked on the survivor'.
 
-Accounting is mandatory and exact: every imported AVIT must appear in exactly one of (a) exactly one survivor's MEMBER-AVITS list, (b) a false-positive dismissal, (c) a duplicate dismissal, or (d) a needs-human-review note. No AVIT may appear in two survivors. Final state: open findings == number of groups, each a self-contained remediation work order (one session, one PR).
+SURVIVOR NOTE FORMAT (mandatory, machine-parsed): the survivor's note MUST BEGIN with exactly these header lines, one field per line, no markdown, no prose on these lines, copied in this exact format:
+GROUP-KEY: <family-slug>|<primary-fix-file>
+MEMBER-AVITS: <comma-separated AVIDs of ALL members incl. the survivor>
+EXPECTED-FILES: <comma-separated repo-relative files the group's one PR will change>
+GROUP-RATIONALE: <one sentence>
+After a blank line, append per-member blocks: AVID, title, verified evidence (file:line), expected fix change.
+
+SELF-CHECK (mandatory, before finishing): re-read every OPEN finding and verify (1) its note starts with the four header lines in exactly the format above, (2) every imported AVIT appears in exactly one survivor's MEMBER-AVITS or exactly one dismissal, (3) no AVIT appears twice, (4) open finding count is within the 5-7 target or justified. Fix any violation before ending.
 
 ## Post Ingestion Guidance
 
-This scan has two jobs after import: (A) false-positive classification against the real code, and (B) consolidation of the survivors into remediation groups. The scan's output findings are REMEDIATION GROUPS, not individual AVITs. The scan does not write fixes.
-
-(A) FP classification — every imported AVIT is an unverified claim produced by an LLM scanner:
-1. Open the cited file and read the real code around the cited lines. Never reason from the code_snippet column alone; it may be truncated, paraphrased, or hallucinated.
-2. Establish reachability: identify a concrete untrusted entry point (HTTP handler, route registration, CLI argument, message consumer, uploaded file) and trace the data flow from it to the sink the AVIT describes. It is a true positive only if attacker-controlled data actually reaches that sink.
-3. Look cross-file before deciding. LLM scanners routinely miss route-level auth/authorization middleware, validation or sanitization in an upstream wrapper, framework-wide controls (auto-escaping, parameterized ORM binding, CSRF middleware), or the fact that the function is never called at all.
-
-Dismiss as a false positive — always citing specific file:line evidence and naming the reason — when: the sink is unreachable from untrusted input (constant/hardcoded value, trusted internal callers only, dead code); an effective control exists on the real path; the code is not part of the deployed application (tests, fixtures, examples, exploit scripts, docs, local dev/build tooling, generated or vendored code — credentials in test fixtures are fixtures, but flag any that look real); the cited location does not contain the described code and the pattern is nowhere in that module (hallucinated location); or the description misreads the code's semantics — state precisely what the code actually does.
-
-Do NOT dismiss because confidence is low (low confidence means investigate harder), because the category is often noisy, or because the fix looks difficult. For confirmed AVITs, correct severity where the code justifies it and give the reachability reasoning. A live (non-fixture) hardcoded credential stays high or above and must note that rotation is required in addition to the code fix.
-
-(B) Consolidation — follow the triage guidance's two-pass policy exactly: verify + key, then one survivor per GROUP-KEY with all member AVITs folded into the survivor's note and non-survivors dismissed as CONSOLIDATED. The customer remediates one session per surviving finding.
+This scan has two jobs after import: (A) false-positive classification against the real code, and (B) Consolidation — follow the triage guidance exactly: verify, then one survivor per group (family category + same-fix-file merge rule), strict survivor note header format, mandatory self-check. The customer remediates one session per surviving finding.
 
 ## Report Guidance
 
