@@ -1,6 +1,6 @@
-# Raven Mythos Ingest v8 — strict-format consolidate-to-survivor, category at ingest
+# Raven Mythos Ingest v9 — verify + category stamp; grouping and remediation are the controller's job
 
-> Imports the open Mythos AVIT records for the scanned repository from an attached Excel workbook, stamps each imported finding with a coarse remediation-family category at ingest time, verifies each against the source code (dismissing false positives with evidence), then consolidates each remediation group to a single surviving open finding whose note starts with strict machine-readable header lines (GROUP-KEY, MEMBER-AVITS, EXPECTED-FILES). Final state: one open finding per remediation group (hard target 5-7 groups per ~15 AVITs), each a self-contained one-session/one-PR work order. AVIT identifiers preserved for reconciliation.
+> Imports the open Mythos AVIT records for the scanned repository from an attached Excel workbook, stamps each imported finding with a coarse remediation-family category at ingest time (the customer's deterministic group-by key), verifies each finding against the source code (dismissing false positives and exact duplicates with evidence), and records the verified fix location per finding. The scan does NOT group or consolidate findings and does NOT remediate: the customer's controller groups the findings by category (with a same-fix-file merge pass) and launches one remediation session per group. AVIT identifiers preserved for reconciliation.
 
 ## Ingestion Source Guidance
 
@@ -30,37 +30,31 @@ CATEGORY STAMPING (mandatory): when importing each finding, set its category/vul
 
 ## Triage Guidance
 
-Triage runs in two passes using per-finding dispositions only (never create new findings).
+Per-finding verification only — do NOT merge, consolidate, or group findings; the customer's controller performs grouping downstream using the category field assigned at import.
 
-PASS 1 — verify. Verify each imported finding against the actual code. Dismiss false positives (with file:line evidence and a named reason). Never dismiss solely because confidence is low.
-
-PASS 2 — consolidate to one survivor per group. Group = the finding's family category (stamped at ingest), refined by one hard rule: findings whose fixes change the same file MUST be in the same group even across families. Allowed family slugs (use ONLY these; when in doubt pick the closest — prefer merging over precision): injection (SQL/NoSQL/command/template/prototype-pollution — anything where untrusted input reaches an interpreter or object graph), xss-encoding (ALL output-encoding issues: reflected XSS, stored XSS, open redirect via unvalidated destination), hardcoded-secrets (ALL hardcoded credentials, secrets, tokens, default/seeded accounts), missing-authz (ALL missing/broken authentication or authorization: unauthenticated routes, missing role checks, mass assignment of privilege, trusting client-supplied identity/claims), session-config (session/cookie/JWT storage and configuration weaknesses), path-traversal (file path/zip handling), dos (ReDoS, resource exhaustion), config-hardening (framework/server misconfiguration not covered above). HARD TARGET: 5-7 groups total for the repository (fewer is fine; more than 7 requires explicit justification per extra group — prefer merging over precision). For each group elect exactly ONE survivor (highest severity; ties: most complete). Dismiss every non-survivor with reason 'CONSOLIDATED into <survivor finding id> (group <key>) — true positive, tracked on the survivor'.
-
-SURVIVOR NOTE FORMAT (mandatory, machine-parsed): the survivor's note MUST BEGIN with exactly these header lines, one field per line, no markdown, no prose on these lines, copied in this exact format:
-GROUP-KEY: <family-slug>|<primary-fix-file>
-MEMBER-AVITS: <comma-separated AVIDs of ALL members incl. the survivor>
-EXPECTED-FILES: <comma-separated repo-relative files the group's one PR will change>
-GROUP-RATIONALE: <one sentence>
-After a blank line, append per-member blocks: AVID, title, verified evidence (file:line), expected fix change.
-
-SELF-CHECK (mandatory, before finishing): re-read every OPEN finding and verify (1) its note starts with the four header lines in exactly the format above, (2) every imported AVIT appears in exactly one survivor's MEMBER-AVITS or exactly one dismissal, (3) no AVIT appears twice, (4) open finding count is within the 5-7 target or justified. Fix any violation before ending.
+For each imported finding:
+1. Verify it against the actual code: reachability, existing mitigations, whether the cited location is real. Dismiss false positives with a named reason (unreachable / mitigated / non-production code / hallucinated location / misread semantics) and file:line evidence. Dismiss exact duplicates (same sink, same root cause), keeping the most complete finding as the survivor and naming it in the dismissal note. Never dismiss solely because confidence is low.
+2. Adjust severity with a one-line justification when the verified reachability contradicts the imported severity.
+3. For every finding you keep open, end its note with two machine-readable lines (no markdown, one per line):
+FIX-FILES: <comma-separated repo-relative files the FIX will primarily change, from your verification, not the scanner-cited location>
+FIX-SUMMARY: <one sentence describing the expected change>
+The controller uses FIX-FILES to merge category groups whose fixes touch the same file.
 
 ## Post Ingestion Guidance
 
-This scan has two jobs after import: (A) false-positive classification against the real code, and (B) Consolidation — follow the triage guidance exactly: verify, then one survivor per group (family category + same-fix-file merge rule), strict survivor note header format, mandatory self-check. The customer remediates one session per surviving finding.
+This scan has one job after import: false-positive and duplicate classification of each finding against the real code, per the triage guidance. Do not group, consolidate, or remediate — the customer's controller does both downstream, using the category field stamped at import and the FIX-FILES note lines.
 
 ## Report Guidance
 
-Executive summary first: AVITs imported (and rows skipped, by reason), the split into confirmed / dismissed as false positive / needs human review, the false-positive rate, and the number of remediation groups produced with the average group size.
+Executive summary first: AVITs imported (and rows skipped, by reason), the split into confirmed / dismissed as false positive / needs human review, the false-positive rate, and the count of findings per category (the customer groups by category downstream).
 
 Then:
-- Remediation groups — table: Group | Member AVITs | Shared root cause | Expected files to change | Severity | Confidence | Conflicts-with.
+- Findings by category — table: Category | Member AVITs | Fix files (from FIX-FILES) | Severity | Confidence.
 - Dismissed as false positive — table: AVIT | Location | Dismissal reason (unreachable / mitigated / non-production code / hallucinated location / misread semantics) | file:line evidence. The evidence citation is mandatory for every row.
 - Reprioritized — the AVIT, Mythos's severity, the new severity, and the reachability reasoning.
 - Needs human review — the AVIT, what is unresolved, and the exact question a reviewer must answer.
-- Grouping comparison — where the groups differ from any incoming group_id, and why.
 - Signal quality for tuning Mythos — false-positive rate by CWE/class and by confidence band, and the recurring patterns behind the false positives (e.g. 'does not resolve route-level auth middleware', 'flags test fixtures as hardcoded secrets').
-- Accounting line: imported N = grouped X + dismissed Y + needs-review Z.
+- Accounting line: imported N = open X + dismissed Y + needs-review Z.
 
 ---
 `scan_type: security` · `mode: ingest` · profile `csprof-4ae8ddf3563d443499e681ecc0d74aa5`
