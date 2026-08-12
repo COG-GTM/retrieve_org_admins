@@ -1,4 +1,4 @@
-# Raven Mythos Ingest v6 — AVIT workbook, FP triage + GROUP-KEY tagging
+# Raven Mythos Ingest v6.1 — AVIT workbook, GROUP-KEY tagging, NO auto-remediation
 
 > Imports the open Mythos AVIT records for the scanned repository from an Excel workbook attached to the scan, verifies each against the source code (dismissing false positives and duplicates with evidence), and stamps every surviving finding with a machine-readable GROUP-KEY chosen per the customer's review policy (CWE family + primary fix file). The customer's controller then groups findings deterministically by that key and launches one remediation session per group. AVIT identifiers are preserved for reconciliation.
 
@@ -69,20 +69,6 @@ Then:
 - Grouping comparison — where the groups differ from any incoming group_id, and why.
 - Signal quality for tuning Mythos — false-positive rate by CWE/class and by confidence band, and the recurring patterns behind the false positives (e.g. 'does not resolve route-level auth middleware', 'flags test fixtures as hardcoded secrets').
 - Accounting line: imported N = grouped X + dismissed Y + needs-review Z.
-
-## Remediation Guidance
-
-A remediation session receives ONE consolidated finding = one remediation group. Fix every member AVIT of that group in a single coherent PR, and nothing else.
-
-Fix the actual root cause identified during classification, not merely the lines Mythos cited. Mythos's remediation text is a suggestion written without full repository context — follow it only where it matches what the code needs.
-
-Keep the change minimal and local. Follow the conventions of the surrounding code (error handling, validation helpers, configuration access) and prefer an existing utility in the repo over introducing a new dependency. Do not modify tests, fixtures, or example/exploit scripts to make a finding go away. Avoid major dependency upgrades unless the vulnerability cannot be fixed safely without one.
-
-Add or update tests per the group's recommended tests: at least one regression test that fails before the fix and passes after. Run the repository's lint, build, and test commands and make them pass before opening the PR.
-
-For hardcoded credentials, move the value to configuration or a secret manager, remove any logging of it, and state in the PR that the exposed credential still needs rotation — the code change alone does not remediate it.
-
-The PR description must list every member AVIT (avid, finding_id, mythos_url), the shared root cause, the files changed, and any behaviour change a reviewer should watch for. If, mid-fix, an AVIT turns out not to share the group's root cause, fix the group's true members, leave that AVIT unfixed, and say so explicitly in the PR so the controller can regroup it rather than recording a fix that did not happen.
 
 ---
 `scan_type: security` · `mode: ingest` · profile `csprof-4ae8ddf3563d443499e681ecc0d74aa5`
