@@ -1,14 +1,16 @@
 """Step 5 — deterministic controller-side grouping (RAVEN's job).
 
-Pulls the scan's triaged findings, reads the GROUP-KEY line the triage
-children stamped on each open finding (profile v6), and does a plain
-GROUP BY into remediation batches. No AI here: the semantic judgment
-(family, primary fix file, FP/duplicate) already happened per finding
-inside the scan; this step only needs string parsing, so the grouping
-is auditable and each AVIT lands in exactly one group by construction.
+Pulls the scan's triaged findings and does a plain GROUP BY on the
+`category` field the ingest child stamped at import time (profile v8's
+coarse remediation-family enum) — the primary, note-parse-free grouping
+mechanism. Falls back to the note's GROUP-KEY line when category is
+absent. No AI here: the semantic judgment (family, FP/duplicate)
+already happened per finding inside the scan; each AVIT lands in
+exactly one group by construction.
 
-Prints the proposed batches and the remediation calls that WOULD be
-made — it does not launch anything.
+Prints the proposed batches and the remediation call for each group
+(POST .../code-scans/{scan_id}/findings/{finding_id}/remediate on the
+group's representative) — it does not launch anything.
 
 Run:  python3 step5_group_findings.py
 """
@@ -37,15 +39,17 @@ def group(findings):
     missing = []
     dismissed = []
     for f in findings:
-        note = f.get("note") or ""
         if f.get("status") == "dismissed":
             dismissed.append(f)
             continue
-        m = KEY_RE.search(note)
-        if not m:
+        key = f.get("category")
+        if not key:
+            m = KEY_RE.search(f.get("note") or "")
+            key = m.group(1).strip().split("|")[0] if m else None
+        if not key:
             missing.append(f)
             continue
-        groups[m.group(1).strip()].append(f)
+        groups[key].append(f)
     return groups, dismissed, missing
 
 
@@ -77,14 +81,14 @@ def main():
             for f in members:
                 print(show_finding(f))
             primary = sev
-            print(f"    -> would remediate via primary finding "
-                  f"{primary['finding_id']} (one session, one PR)")
+            print(f"    -> POST .../code-scans/{scan_id}/findings/"
+                  f"{primary['finding_id']}/remediate  (one session, one PR)")
 
         for f in dismissed:
             reason = (f.get("note") or "")[:90].replace("\n", " ")
             print(f"\n  DISMISSED: {f['title'][:60]} — {reason}")
         for f in missing:
-            print(f"\n  !! OPEN WITHOUT GROUP-KEY (needs human review): "
+            print(f"\n  !! OPEN WITHOUT category/GROUP-KEY (needs human review): "
                   f"{f['title'][:70]}")
 
 

@@ -13,21 +13,20 @@ reconciliation), but the middle of its pipeline — parse, verify, false-positiv
 grouping — moves out of one overloaded Devin session and into a **Security Swarm
 ingestion scan per repo**. The scan imports the Mythos AVITs from the same attachment
 RAVEN already produces, verifies each one against the real code in parallel workers,
-dismisses false positives and duplicates with written evidence, and **consolidates the
-confirmed findings into ~5–7 remediation groups, each represented by ONE open finding**
-that carries the full member-AVIT roster and expected fix files in a machine-readable
-header. RAVEN then triggers exactly **one remediation per open finding** (one session,
-one PR per group) via the finding's remediate endpoint, and reconciles by reading the
-`session_id`/`pr_url` the platform stamps back onto the finding.
+dismisses false positives and duplicates with written evidence, and **stamps every
+finding with a remediation-family `category`** from a fixed enum defined in the profile.
+RAVEN then does a plain `GROUP BY category` on the findings API response (~5–7 groups
+per repo), triggers exactly **one remediation per group** via the group representative's
+remediate endpoint, and reconciles by reading the `session_id`/`pr_url` the platform
+stamps back onto the finding.
 
 ```
 Mythos AVIT tranche (xlsx)
   RAVEN │ POST /v1/attachments                       (unchanged from today)
         │ POST .../code-scans/ingestion  × N repos   (replaces create-session)
-  Swarm │ import → stamp category → verify each AVIT vs code (FP gate)
-        │ → consolidate-to-survivor: ONE open finding per group
-  RAVEN │ GET .../findings?scan_id=…  → validate accounting (deterministic)
-        │ POST .../findings/{id}/remediate  × one per open finding
+  Swarm │ import → stamp category (family enum) → verify each AVIT vs code (FP gate)
+  RAVEN │ GET .../findings?scan_id=… → GROUP BY category → validate accounting
+        │ POST .../code-scans/{scan_id}/findings/{rep_id}/remediate × one per group
   Swarm │ one session per group → one PR per group; session_id + pr_url
         │   stamped back on the finding
   RAVEN │ reconcile PRs → AVIDs via MEMBER-AVITS / external_id
@@ -139,32 +138,27 @@ So the mechanism is layered:
 1. **Ingest-time `category`** = coarse remediation-family slug (from a fixed enum in
    the profile: `injection`, `xss-encoding`, `hardcoded-secrets`, `missing-authz`,
    `session-config`, `path-traversal`, `dos`, `config-hardening`). Robust, queryable,
-   groupby-able without note parsing.
+   groupby-able without note parsing. **This is the primary grouping mechanism** —
+   empirically 100% populated and it alone produced the target shape (meridian 4
+   groups, goof 7 groups for 30 AVITs).
 2. **Triage pass 1 — verify**: each AVIT checked against the code; FPs dismissed with
    file:line evidence (this gate caught real FPs unprompted, e.g. an SSTI neutralized
    by template auto-escaping).
-3. **Triage pass 2 — consolidate-to-survivor**: group = family category, refined by the
-   hard rule *fixes changing the same file merge, even across families*. One survivor
-   elected per group (highest severity); all other members dismissed with reason
-   `CONSOLIDATED into <survivor> — true positive, tracked on the survivor`. The
-   survivor's note must BEGIN with a strict machine header:
+3. **(Attempted, then rejected) in-scan consolidate-to-survivor**: v7/v8 tried to make
+   the scan itself end with one OPEN finding per group (elect a survivor, dismiss
+   members as CONSOLIDATED, strict machine header in the survivor's note). It worked
+   partially (v7 meridian 14→8 open) but is **structurally unreliable**: triage fans
+   out as parallel batch children, each seeing only its own findings, with **no global
+   reduce step** — so cross-batch survivor election only succeeds when a group happens
+   to land in one batch. Verdict: do not depend on it. The finding list stays
+   per-AVIT; the *group* is the work-order unit, tracked controller-side.
+4. **RAVEN groupby + validation** (deterministic): `GROUP BY category`, assert every
+   AVIT in exactly one group or one dismissal, no duplicates, group count in range,
+   verified fix files non-overlapping across groups (merge groups that overlap) — this
+   is `step5_group_findings.py` + `validate_groups.py` / `planner_schema.json`.
 
-   ```
-   GROUP-KEY: <family-slug>|<primary-fix-file>
-   MEMBER-AVITS: <all member AVIDs, incl. survivor's>
-   EXPECTED-FILES: <files the group's one PR will change>
-   GROUP-RATIONALE: <one sentence>
-   ```
-   followed by per-member evidence blocks. A mandatory self-check pass enforces the
-   format and exact-once accounting before the scan ends.
-4. **RAVEN validation** (deterministic): parse headers, assert every AVIT in exactly
-   one survivor or one dismissal, no duplicates, group count 5–7 (or justified),
-   EXPECTED-FILES non-overlapping across groups. Reject/flag on violation — this is
-   `validate_groups.py` / `planner_schema.json`.
-
-Result shape: **open findings == remediation groups.** Each open finding is a
-self-contained work order (verified evidence + member roster + expected files), and the
-"7 findings instead of 14 AVITs" view is exactly what the UI shows.
+Result shape: the UI shows N verified per-AVIT findings, but the **work-order count is
+the group count** — e.g. 30 AVITs → 11 groups → 11 sessions → 11 PRs.
 
 ### Evolution that got here (details in RAVEN-CONTEXT.md §6)
 - v3–v4: asked the scan to "group" → either 1:1 output or double-counted AVITs. Lesson:
@@ -173,16 +167,24 @@ self-contained work order (verified evidence + member roster + expected files), 
   per-finding dispositions can't merge unless told HOW (dismiss-into-survivor).
 - v6: GROUP-KEY tag + controller groupby → worked (meridian 7 groups, exact-once by
   construction) but leaves N open findings and needs the controller to group.
-- v7: consolidate-to-survivor → merging works (meridian 14→8 open), but free-prose
-  notes broke machine parsing, and fine-grained families under-merged goof.
-- v8 (current): strict header template + self-check pass + coarse family enum +
-  ingest-time category stamping.
+- v7: consolidate-to-survivor → merging partially works (meridian 14→8 open), but
+  free-prose notes broke machine parsing and fine-grained families under-merged goof.
+- v8: strict header template + self-check + coarse family enum + ingest-time category
+  stamping → consolidation regressed (parallel triage batches have no global reduce),
+  but **category stamping worked perfectly** and a plain groupby on it hit the target
+  shape. Final mechanism: category groupby controller-side; in-scan consolidation
+  treated as best-effort only.
 
 ## 5. Remediation and the control point
 
-- **Trigger**: RAVEN calls `POST .../findings/{finding_id}/remediate` once per open
-  finding. The session arrives pre-seeded with the survivor's verified evidence and
-  roster; `session_id` and `pr_url` are stamped back on the finding automatically.
+- **Trigger**: RAVEN calls
+  `POST /v3/organizations/{org}/code-scans/{scan_id}/findings/{finding_id}/remediate`
+  once per group, on the group's representative (highest-severity) finding. Verified
+  201 + `{finding_id, session_id}`; returns 409 if the finding already has a
+  remediation session. The endpoint takes **no prompt body** — the session is seeded
+  from the finding's record. To widen the session's scope to the whole group, send a
+  follow-up message via `POST /v1/session/{session_id}/message` listing the group's
+  other members (verified working in the PoC).
 - **Quota**: scan fan-out (orchestrator + all workers) runs on the CodeScanService
   identity (5,000 concurrent/org) — it does NOT consume RAVEN's 500-session `bot_apk`
   pool. Remediate calls made with WF's key run on their 500 pool; automation-triggered
@@ -206,7 +208,8 @@ POST /v1/attachments                                   # multipart xlsx → URL
 POST /v3/organizations/{org}/code-scans/ingestion      # {repo_name, profile_id, attachment_urls}
 GET  /v3/organizations/{org}/code-scans/scans?limit=N  # poll status (list; no per-scan GET)
 GET  /v3/organizations/{org}/code-scans/findings?scan_id=…&limit=N
-POST /v3/organizations/{org}/code-scans/findings/{id}/remediate
+POST /v3/organizations/{org}/code-scans/{scan_id}/findings/{finding_id}/remediate   # 201 {finding_id, session_id}; 409 if already remediated; no prompt body
+POST /v1/session/{session_id}/message                  # widen session scope to the full group
 PATCH /v3beta1/organizations/{org}/code-scans/profiles/{profile_id}   # profile updates (PUT=405)
 ```
 
@@ -223,10 +226,10 @@ reviewable like any config.
 | File | Role in the solution |
 |---|---|
 | `step1_upload_tranche.py` | RAVEN's existing attachment handoff, unchanged |
-| `profile_v3.json` (v8) | The policy: verification, FP gate, family enum, consolidate-to-survivor, strict header, self-check |
+| `profile_v3.json` (v8) | The policy: verification, FP gate, ingest-time family-enum category stamping |
 | `step3_launch_scans.py` | One ingestion scan per repo + watch loop |
 | `step4_poll_findings.py` | Findings pull + AVIT accounting |
-| `step5_group_findings.py` | RAVEN's deterministic side: parse headers, groupby, print the per-group remediate calls |
+| `step5_group_findings.py` | RAVEN's deterministic side: GROUP BY category (GROUP-KEY fallback), print the per-group remediate calls |
 | `validate_groups.py`, `planner_schema.json` | The audit gate: exact-once, overlap, size checks |
 
 ## 8. Why this beats the status quo (the pitch, tied to their pain)
@@ -246,8 +249,8 @@ reviewable like any config.
 
 ## 9. Remaining items before production posture
 
-1. Confirm v8 closes the two v7 gaps (strict header compliance; goof consolidating to
-   ≤7 groups) — in flight.
+1. Done — v8 settled the mechanism question: category groupby is the reliable path;
+   in-scan consolidation is not (no global reduce across triage batches).
 2. Get the product-level answer on the auto-remediation tail switch.
 3. Run one grouped remediation end-to-end (survivor → session → PR → reconciliation)
    as the final demo leg.
