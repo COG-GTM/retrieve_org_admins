@@ -1,6 +1,6 @@
-# Raven Mythos Ingest v6.1 — AVIT workbook, GROUP-KEY tagging, NO auto-remediation
+# Raven Mythos Ingest v7 — consolidate-to-survivor: one open finding per remediation group
 
-> Imports the open Mythos AVIT records for the scanned repository from an Excel workbook attached to the scan, verifies each against the source code (dismissing false positives and duplicates with evidence), and stamps every surviving finding with a machine-readable GROUP-KEY chosen per the customer's review policy (CWE family + primary fix file). The customer's controller then groups findings deterministically by that key and launches one remediation session per group. AVIT identifiers are preserved for reconciliation.
+> Imports the open Mythos AVIT records for the scanned repository from an attached Excel workbook, verifies each against the source code (dismissing false positives and duplicates with evidence), assigns each confirmed finding a GROUP-KEY per the customer's review policy (CWE family + primary fix file), then CONSOLIDATES each group to a single surviving open finding that carries every member AVIT. Final state: one open finding per remediation group (~5-7 per ~15 AVITs), ready for one remediation session / one PR each. AVIT identifiers preserved for reconciliation.
 
 ## Ingestion Source Guidance
 
@@ -28,19 +28,17 @@ Carry onto each imported finding so it stays traceable back to Mythos and to RAV
 
 ## Triage Guidance
 
-Triage each imported finding individually: verify against the code, dismiss false positives and duplicates (keep the most complete finding as the survivor), adjust severity with justification. Do NOT merge findings into new consolidated records — the customer's controller performs grouping downstream using a key you assign.
+Triage runs in two passes using per-finding dispositions only (never create new findings).
 
-For EVERY finding you keep open, append to the end of its note a single machine-readable line in exactly this format (no markdown, one line):
-GROUP-KEY: <family>|<primary-fix-file>
-where:
-- <family> is one of a small set of stable remediation-family slugs you choose per repo, derived from CWE family / fix pattern, e.g. injection, xss, hardcoded-credentials, authz, session-config, dependency-upgrade, config-hardening. Use the same slug for findings whose fixes follow the same pattern; do not invent a new slug when an existing one fits.
-- <primary-fix-file> is the repo-relative path of the file the FIX will primarily change (from your verification, not the scanner-reported location). Normalize: if two findings' fixes touch the same file, their keys MUST be identical in the file part.
+PASS 1 — verify and key. Verify each imported finding against the actual code. Dismiss false positives (with file:line evidence and a named reason) and exact duplicates (keep the most complete as survivor). Never dismiss solely because confidence is low. For every finding that remains, choose a GROUP-KEY = <family>|<primary-fix-file>: <family> is a stable remediation-family slug (e.g. injection, xss, hardcoded-credentials, authz, session-config, dependency-upgrade, config-hardening) shared by findings whose fixes follow the same pattern; <primary-fix-file> is the repo-relative file the FIX will primarily change (from your verification, not the scanner-cited location). Customer policy: findings sharing a family SHOULD share a key; findings whose fixes change the same file MUST share a key. Target roughly 5-7 distinct keys per ~15-20 confirmed findings — prefer reusing an existing key over inventing a new one; a single-member key needs explicit justification.
 
-Policy intent (from the customer): findings sharing a family SHOULD share a group; findings whose fixes change the same file MUST share a group. So when a finding's fix spans several files, pick as primary the file it shares with other findings if any, otherwise the most central file.
-Also append, on the next line:
-GROUP-RATIONALE: <one sentence: why this family/file, and expected other files to change>
+PASS 2 — consolidate to one survivor per key. For each GROUP-KEY, elect exactly ONE survivor: the member with the highest severity (ties: the most complete/central finding). Update the survivor's note to be the group record, containing:
+GROUP-KEY: <key>
+MEMBER-AVITS: <comma-separated list of ALL member AVIDs, including the survivor's>
+then, for each member, a short block: its AVID, title, verified evidence (file:line), and expected fix change. End with EXPECTED-FILES: <all files the group's one PR will change> and GROUP-RATIONALE: <one sentence>.
+Dismiss every non-survivor member with reason 'CONSOLIDATED into <survivor finding id> (group <key>)' — this is a grouping disposition, not a judgment that the issue is invalid; say so in the note. Adjust the survivor's severity to the group's highest.
 
-Aim for key reuse: across ~15 confirmed findings, a healthy result is roughly 4-7 distinct GROUP-KEY values. A key used by only one finding is acceptable only when nothing else shares its family or fix file. Severity rules: unauthenticated RCE, auth bypass, injection reaching a sensitive sink = critical/high; hardcoded live credentials = high; defense-in-depth = low. Account explicitly in each note: this finding is open (with GROUP-KEY) or dismissed (with reason and evidence). Never leave an open finding without a GROUP-KEY line.
+Accounting is mandatory and exact: every imported AVIT must appear in exactly one of (a) exactly one survivor's MEMBER-AVITS list, (b) a false-positive dismissal, (c) a duplicate dismissal, or (d) a needs-human-review note. No AVIT may appear in two survivors. Final state: open findings == number of groups, each a self-contained remediation work order (one session, one PR).
 
 ## Post Ingestion Guidance
 
@@ -55,7 +53,7 @@ Dismiss as a false positive — always citing specific file:line evidence and na
 
 Do NOT dismiss because confidence is low (low confidence means investigate harder), because the category is often noisy, or because the fix looks difficult. For confirmed AVITs, correct severity where the code justifies it and give the reachability reasoning. A live (non-fixture) hardcoded credential stays high or above and must note that rotation is required in addition to the code fix.
 
-(B) Group tagging — follow the triage guidance: per-finding dispositions only, and every open finding must end its note with the GROUP-KEY and GROUP-RATIONALE lines. The customer's controller does the actual grouping by these keys; your job is choosing the right key per finding so the groupby yields coherent, non-conflicting remediation batches.
+(B) Consolidation — follow the triage guidance's two-pass policy exactly: verify + key, then one survivor per GROUP-KEY with all member AVITs folded into the survivor's note and non-survivors dismissed as CONSOLIDATED. The customer remediates one session per surviving finding.
 
 ## Report Guidance
 
