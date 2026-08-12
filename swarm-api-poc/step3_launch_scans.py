@@ -15,6 +15,8 @@ Run:  python3 step3_launch_scans.py           # create both scans
 import sys
 import time
 
+import requests
+
 from common import REPOS, S, load_state, save_state, show, url
 
 state = load_state()
@@ -47,8 +49,13 @@ def watch():
     # source, so poll it once per tick and index by scan_id.
     scans = state.get("scans", {})
     while True:
-        resp = S.get(url("code-scans/scans"), params={"limit": 50})
-        by_id = {i["scan_id"]: i.get("status") for i in resp.json().get("items", [])}
+        try:
+            resp = S.get(url("code-scans/scans"), params={"limit": 50}, timeout=30)
+            by_id = {i["scan_id"]: i.get("status") for i in resp.json().get("items", [])}
+        except requests.RequestException as e:
+            print(time.strftime("%H:%M:%S"), f"poll error ({type(e).__name__}); retrying")
+            time.sleep(30)
+            continue
         statuses = {repo: by_id.get(scan_id, "not-listed")
                     for repo, scan_id in scans.items()}
         line = " | ".join(f"{r.split('/')[-1]}: {s}" for r, s in statuses.items())
