@@ -33,7 +33,75 @@ Mythos AVIT tranche (xlsx)
   RAVEN │ reconcile PRs → AVIDs via MEMBER-AVITS / external_id
 ```
 
-## 2. Division of labor (the core design decision)
+## 2. Security Swarm concepts — the vocabulary this solution is built on
+
+Everything below was established during the PoC (docs + verified API behavior + source
+tracing where noted). Getting these object boundaries right was half the work.
+
+### The object model
+
+- **Profile** — a reusable *scan policy*: scope + per-stage guidance text
+  (`ingestion_source_guidance`, `triage_guidance`, `post_ingestion_guidance`,
+  `report_guidance`, `remediation_guidance`, plus discover-mode stages like
+  `threat_model_guidance` / `investigation_guidance` / `validation_guidance`). Think
+  "playbook whose output is findings, not a PR". One profile serves the whole fleet;
+  it is parameterized at launch by `repo_name` + `attachment_urls`. Policy-as-code:
+  WF's grouping rules live here, versioned and reviewable. Updated via PATCH.
+- **Scan** — one *execution* of a profile against one repo. Not a session: it's an
+  orchestrator Devin plus parallel worker Devins ("Agentic MapReduce"). Polled via the
+  scans list endpoint (there is no per-scan GET).
+- **Mode** — a profile field with exactly two values, choosing where leads come from:
+  - `discover`: Swarm finds vulnerabilities itself by analyzing the repo.
+  - `ingest`: Swarm starts from *supplied external findings* (our case — Mythos).
+  Independent of `scan_type` (security, code-quality, …; only `security` is enabled in
+  this org).
+- **Threat model** — a per-RUN, repo-specific analysis artifact (entry points, trust
+  boundaries, attacker personas) generated in discover mode only. It is not a profile
+  and doesn't exist in ingest mode — the imported findings ARE the leads ("Mythos is
+  the threat model").
+- **Finding** — the durable, queryable deliverable of a scan: title, severity, status
+  (Open / Dismissed / Reviewed), confidence, `category`/`vuln_slug`, `external_id`,
+  evidence-bearing `note`, and — after remediation — `session_id` + `pr_url`. A finding
+  is NOT a PR; it's the record that a remediation can later be launched from.
+- **Remediation** — an *action on a finding* (UI "Assign to Devin", the remediate API,
+  or an automation). It launches an **ordinary top-level Devin session** — the same
+  kind RAVEN creates today — just pre-seeded with the finding's verified evidence, and
+  with the resulting session/PR stamped back on the finding. Swarm's only "special"
+  execution is the scan itself.
+
+### Discover vs ingest — phase pipelines (source-verified)
+
+| | `discover` | `ingest` |
+|---|---|---|
+| Leads come from | Threat-model child: builds threat model, produces signal batches | Ingest child: imports customer findings from the attachments, creating finding records up front |
+| Interactive pause | User approves threat model before spend | User reviews import summary + duplication signal |
+| Middle (map) | Batch investigation: one child per batch in parallel (up to ~100 concurrent), open-ended hunting | Triage: finding IDs batched, one child per batch in parallel, targeted verification of specific claims |
+| Consolidation | Aggregation child: dedupe, ownership enrichment, attack chains (`related_finding_ids`), P0–P3 triage | **None** — no aggregation phase exists; only per-finding dispositions |
+| Tail (shared) | Optional runtime validation (exploit in sandbox), report | Same shared validation/report phases |
+
+Practical consequences we designed around:
+- Ingest-mode findings appear in the UI at import time, already enriched, then triage
+  children mutate them — there is no "reduce" step that sees everything at once.
+- Triage dispositions are the complete vocabulary: **dismiss** (`false_positive`,
+  `mitigated`, `duplicate`, `accepted_risk`, `not_actionable`), **adjust severity**,
+  or **keep open** — plus rewriting the note. Nothing merges findings into new
+  objects, hence the consolidate-to-survivor pattern (§4).
+- `category`/`vuln_slug`/`external_id` are settable **only at ingest**; the finding
+  update path cannot change category later. Notes are the triage-time channel.
+- Ingest mode is purpose-built for this use case, per its orchestrator prompt: "the
+  customer already has findings from their own tooling, and this scan imports them so
+  they can be managed here."
+
+### Execution identities and quota (source-verified)
+
+Session quota is checked per (user, org) for every session including children:
+- Scan orchestrators and ALL scan workers → `CodeScanService` identity: **5,000**
+  concurrent/org. Scan fan-out never touches RAVEN's pool.
+- Direct API calls with WF's key (`bot_apk`) → their **500** pool (remediate included).
+- Automation-triggered sessions → automation service: **1,000**.
+(Current implementation values, not contractual.)
+
+## 3. Division of labor (the core design decision)
 
 | Concern | Owner | Why |
 |---|---|---|
@@ -53,7 +121,7 @@ grouping arithmetic and accounting.** Everything that must be auditable (every A
 exactly once, no overlapping groups, group count in range) is a string operation RAVEN
 performs on structured fields — never an LLM output taken on faith.
 
-## 3. The grouping mechanism (what we converged on and why)
+## 4. The grouping mechanism (what we converged on and why)
 
 WF's review policy: ~5–7 groups per ~20 AVITs, grouped by CWE family, with a hard
 same-fix-file merge rule, one PR per group.
@@ -110,7 +178,7 @@ self-contained work order (verified evidence + member roster + expected files), 
 - v8 (current): strict header template + self-check pass + coarse family enum +
   ingest-time category stamping.
 
-## 4. Remediation and the control point
+## 5. Remediation and the control point
 
 - **Trigger**: RAVEN calls `POST .../findings/{finding_id}/remediate` once per open
   finding. The session arrives pre-seeded with the survivor's verified evidence and
@@ -131,7 +199,7 @@ self-contained work order (verified evidence + member roster + expected files), 
   it needs a product-level answer before WF can rely on either "always off" or
   "always on, capped". Until then, treat the tail as ON for crit/high findings.
 
-## 5. Contracts (exact API surface)
+## 6. Contracts (exact API surface)
 
 ```
 POST /v1/attachments                                   # multipart xlsx → URL
@@ -150,7 +218,7 @@ in the PoC); per-repo variation comes only from `repo_name` + `attachment_urls` 
 launch. Profile = policy-as-code: WF's grouping rules live in versioned guidance text,
 reviewable like any config.
 
-## 6. What each PoC file proves
+## 7. What each PoC file proves
 
 | File | Role in the solution |
 |---|---|
@@ -161,7 +229,7 @@ reviewable like any config.
 | `step5_group_findings.py` | RAVEN's deterministic side: parse headers, groupby, print the per-group remediate calls |
 | `validate_groups.py`, `planner_schema.json` | The audit gate: exact-once, overlap, size checks |
 
-## 7. Why this beats the status quo (the pitch, tied to their pain)
+## 8. Why this beats the status quo (the pitch, tied to their pain)
 
 1. **Context**: the fix-writing session no longer carries parsing + FP triage +
    grouping — it gets one verified, pre-scoped group. (Their #1 quality complaint.)
@@ -176,7 +244,7 @@ reviewable like any config.
 6. **Auditability**: the AI's judgment is captured per finding; the grouping
    arithmetic that must be exact runs as deterministic, reviewable controller code.
 
-## 8. Remaining items before production posture
+## 9. Remaining items before production posture
 
 1. Confirm v8 closes the two v7 gaps (strict header compliance; goof consolidating to
    ≤7 groups) — in flight.
