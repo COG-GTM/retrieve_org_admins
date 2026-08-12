@@ -1,25 +1,8 @@
-# Scan Profile — Raven Mythos Ingest v5
+# Raven Mythos Ingest v6 — AVIT workbook, FP triage + GROUP-KEY tagging
 
-Live profile: `csprof-4ae8ddf3563d443499e681ecc0d74aa5` (Security > Profiles).
-Source of truth: `profile_v3.json`; pushed to the platform via the API.
+> Imports the open Mythos AVIT records for the scanned repository from an Excel workbook attached to the scan, verifies each against the source code (dismissing false positives and duplicates with evidence), and stamps every surviving finding with a machine-readable GROUP-KEY chosen per the customer's review policy (CWE family + primary fix file). The customer's controller then groups findings deterministically by that key and launches one remediation session per group. AVIT identifiers are preserved for reconciliation.
 
-## Name
-
-`Raven Mythos Ingest v5 — AVIT workbook, CWE-family grouping (5-7 groups per ~20)`
-
-## Description
-
-Imports the open Mythos AVIT records for the scanned repository from an Excel workbook attached to the scan, classifies each against the source code to separate true positives from false positives, then consolidates the survivors into remediation groups using the customer's review policy: CWE-family buckets with a mandatory same-fix-file merge rule, targeting roughly 5-7 groups per ~20 AVITs. One consolidated finding per group; each carries its member AVITs so RAVEN can reconcile AVIT -> group -> session -> PR.
-
-## Scan type
-
-`security`
-
-## Mode
-
-`ingest`
-
-## Ingestion source guidance — where findings come from & what to preserve
+## Ingestion Source Guidance
 
 Findings come from a Mythos AVIT export attached to this scan as an Excel workbook (.xlsx) — the same table of AVIT records RAVEN passes to Devin today. There is no API to query and no database to connect to.
 
@@ -43,23 +26,23 @@ Carry onto each imported finding so it stays traceable back to Mythos and to RAV
 - Severity mapped straight through: Critical -> critical, High -> high, Medium -> medium, Low/Informational/Info -> low. Preserve the original Mythos severity string alongside the mapped value so any reprioritization is auditable.
 - Location as repo-relative file_path plus start_line-end_line. If the line numbers no longer match the current code (the export may predate recent commits), re-anchor using code_snippet and note that the line was adjusted. Never drop a finding solely because its line number is stale.
 
-## Triage guidance — the grouping policy (v5: WF's CWE-family + same-file rules)
+## Triage Guidance
 
-Grouping is the primary output of triage. Consolidate the confirmed AVITs into REMEDIATION GROUPS and emit ONE finding per group — never one finding per AVIT unless a group genuinely has one member. A group becomes one focused remediation session and one PR, so groups are review batches: the objective is PRs that are easy to review and cannot conflict with each other, not maximal fix purity.
+Triage each imported finding individually: verify against the code, dismiss false positives and duplicates (keep the most complete finding as the survivor), adjust severity with justification. Do NOT merge findings into new consolidated records — the customer's controller performs grouping downstream using a key you assign.
 
-Grouping policy (in priority order):
-1. SAME-FILE MERGE (mandatory): AVITs whose FIXES are expected to change the same file go in the same group, even across CWE families. Base this on the predicted fix location you establish during verification, not on the scanner-reported file_path. Two PRs touching the same file cause merge conflicts; that is never acceptable output.
-2. CWE FAMILY: bucket the remaining AVITs by CWE family / vulnerability class (e.g. injection-family CWE-77/78/89/94, XSS CWE-79/80, hardcoded credentials & secrets CWE-259/321/798, authN/authZ & session CWE-284/285/287/306/862/863, vulnerable-dependency upgrades, configuration hardening). Related CWEs whose fixes follow the same pattern belong together.
-3. TARGET COUNT: aim for roughly 5-7 groups per ~20 confirmed AVITs (about 2-4 AVITs per group). For smaller sets, scale proportionally (e.g. 14-16 AVITs -> roughly 4-6 groups). A single-AVIT group is allowed only when the AVIT genuinely shares neither file nor family with anything else — justify each one explicitly.
-4. SPLIT RULE: split a family bucket only when the code shows its members' fixes are truly independent AND land in disjoint files AND the bucket would otherwise exceed ~6 AVITs or mix unrelated subsystems. State why for every split.
+For EVERY finding you keep open, append to the end of its note a single machine-readable line in exactly this format (no markdown, one line):
+GROUP-KEY: <family>|<primary-fix-file>
+where:
+- <family> is one of a small set of stable remediation-family slugs you choose per repo, derived from CWE family / fix pattern, e.g. injection, xss, hardcoded-credentials, authz, session-config, dependency-upgrade, config-hardening. Use the same slug for findings whose fixes follow the same pattern; do not invent a new slug when an existing one fits.
+- <primary-fix-file> is the repo-relative path of the file the FIX will primarily change (from your verification, not the scanner-reported location). Normalize: if two findings' fixes touch the same file, their keys MUST be identical in the file part.
 
-Deduplicate first: AVITs describing the same flaw (same sink at several lines, one flaw filed under two CWEs, handler + helper) collapse into one membership — but every AVIT must appear in EXACTLY ONE group. Never list the same AVIT in two findings; if two groups both seem to need it, that is the same-file merge rule telling you to merge the groups. Do not emit two findings describing the same issue.
+Policy intent (from the customer): findings sharing a family SHOULD share a group; findings whose fixes change the same file MUST share a group. So when a finding's fix spans several files, pick as primary the file it shares with other findings if any, otherwise the most central file.
+Also append, on the next line:
+GROUP-RATIONALE: <one sentence: why this family/file, and expected other files to change>
 
-Every emitted finding must state: member AVITs (complete list), the CWE family / policy bucket, shared fix theme, expected files to change, grouping rationale and confidence, recommended tests. If two groups' expected files overlap after all merging, that is an error in the grouping — merge them. State the accounting explicitly: imported = grouped + dismissed + needs-human-review, with each AVIT counted exactly once, and report the number of groups and average group size.
+Aim for key reuse: across ~15 confirmed findings, a healthy result is roughly 4-7 distinct GROUP-KEY values. A key used by only one finding is acceptable only when nothing else shares its family or fix file. Severity rules: unauthenticated RCE, auth bypass, injection reaching a sensitive sink = critical/high; hardcoded live credentials = high; defense-in-depth = low. Account explicitly in each note: this finding is open (with GROUP-KEY) or dismissed (with reason and evidence). Never leave an open finding without a GROUP-KEY line.
 
-Severity of a group is the highest severity among its members. Treat unauthenticated RCE, auth bypass, and injection reaching a sensitive sink as critical/high; hardcoded live credentials as high; defense-in-depth recommendations as low.
-
-## Post-ingestion guidance — FP classification + group contents
+## Post Ingestion Guidance
 
 This scan has two jobs after import: (A) false-positive classification against the real code, and (B) consolidation of the survivors into remediation groups. The scan's output findings are REMEDIATION GROUPS, not individual AVITs. The scan does not write fixes.
 
@@ -72,9 +55,9 @@ Dismiss as a false positive — always citing specific file:line evidence and na
 
 Do NOT dismiss because confidence is low (low confidence means investigate harder), because the category is often noisy, or because the fix looks difficult. For confirmed AVITs, correct severity where the code justifies it and give the reachability reasoning. A live (non-fixture) hardcoded credential stays high or above and must note that rotation is required in addition to the code fix.
 
-(B) Grouping — follow the grouping policy defined in the triage guidance (CWE-family buckets with mandatory same-fix-file merging, ~5-7 groups per ~20 AVITs, every AVIT in exactly one group). The scan's output findings are REMEDIATION GROUPS, not individual AVITs. An AVIT that cannot be confidently classified or grouped becomes its own finding marked needs human review with the exact open question — never resolve ambiguity by guessing.
+(B) Group tagging — follow the triage guidance: per-finding dispositions only, and every open finding must end its note with the GROUP-KEY and GROUP-RATIONALE lines. The customer's controller does the actual grouping by these keys; your job is choosing the right key per finding so the groupby yields coherent, non-conflicting remediation batches.
 
-## Report guidance — what the human-readable report contains
+## Report Guidance
 
 Executive summary first: AVITs imported (and rows skipped, by reason), the split into confirmed / dismissed as false positive / needs human review, the false-positive rate, and the number of remediation groups produced with the average group size.
 
@@ -87,7 +70,7 @@ Then:
 - Signal quality for tuning Mythos — false-positive rate by CWE/class and by confidence band, and the recurring patterns behind the false positives (e.g. 'does not resolve route-level auth middleware', 'flags test fixtures as hardcoded secrets').
 - Accounting line: imported N = grouped X + dismissed Y + needs-review Z.
 
-## Remediation guidance — rules for the later fix sessions (not used by the scan)
+## Remediation Guidance
 
 A remediation session receives ONE consolidated finding = one remediation group. Fix every member AVIT of that group in a single coherent PR, and nothing else.
 
@@ -100,3 +83,6 @@ Add or update tests per the group's recommended tests: at least one regression t
 For hardcoded credentials, move the value to configuration or a secret manager, remove any logging of it, and state in the PR that the exposed credential still needs rotation — the code change alone does not remediate it.
 
 The PR description must list every member AVIT (avid, finding_id, mythos_url), the shared root cause, the files changed, and any behaviour change a reviewer should watch for. If, mid-fix, an AVIT turns out not to share the group's root cause, fix the group's true members, leave that AVIT unfixed, and say so explicitly in the PR so the controller can regroup it rather than recording a fix that did not happen.
+
+---
+`scan_type: security` · `mode: ingest` · profile `csprof-4ae8ddf3563d443499e681ecc0d74aa5`
